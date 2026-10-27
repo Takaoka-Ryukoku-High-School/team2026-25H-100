@@ -14,6 +14,23 @@ INK = "#26332E"
 MUTED = "#7B8580"
 LINE = "#E4E7E1"
 ORANGE = "#B86A35"
+CLASS_GROUPS = {
+    "1年生": [f"{number}組" for number in range(1, 8)],
+    "2年生": [
+        *(f"{number}組" for number in range(1, 8)),
+        "アートコース",
+        "L&Sコース",
+        "デジタルコース",
+    ],
+    "3年生": [f"{number}組" for number in range(1, 7)],
+}
+CLASS_SUBJECTS = {
+    ("2年生", "アートコース"): [
+        ("2-art-comic-art", "コミックアート"),
+        ("2-art-digital-art", "デジタルアート"),
+        ("2-art-management", "アートマネジメント"),
+    ]
+}
 
 
 def starter_data():
@@ -29,6 +46,8 @@ def starter_data():
             {
                 "id": str(uuid4()),
                 "subject_id": "math",
+                "grade": "1年生",
+                "class_name": "1組",
                 "kind": "test",
                 "title": "第2回定期考査",
                 "date": (today + timedelta(days=8)).isoformat(),
@@ -38,6 +57,8 @@ def starter_data():
             {
                 "id": str(uuid4()),
                 "subject_id": "english",
+                "grade": "1年生",
+                "class_name": "1組",
                 "kind": "assignment",
                 "title": "Lesson 5 ワーク提出",
                 "date": (today + timedelta(days=3)).isoformat(),
@@ -47,6 +68,8 @@ def starter_data():
             {
                 "id": str(uuid4()),
                 "subject_id": "japanese",
+                "grade": "1年生",
+                "class_name": "1組",
                 "kind": "progress",
                 "title": "小説「羅生門」",
                 "date": today.isoformat(),
@@ -91,6 +114,22 @@ def load_data():
         for record in records
     ):
         raise ValueError("保存データの共有情報を読み込めません。")
+    migrated = False
+    for record in records:
+        if "grade" not in record:
+            record["grade"] = "1年生"
+            migrated = True
+        if "class_name" not in record:
+            record["class_name"] = "1組"
+            migrated = True
+        if not isinstance(record["grade"], str) or not isinstance(
+            record["class_name"], str
+        ):
+            raise ValueError("保存データの学年・クラス情報を読み込めません。")
+    if migrated:
+        DATA_FILE.write_text(
+            json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
     return data
 
 
@@ -105,6 +144,8 @@ def main(page: ft.Page):
     data = load_data()
     subjects = data["subjects"]
     records = data["records"]
+    selected_grade = "1年生"
+    selected_class = CLASS_GROUPS[selected_grade][0]
     selected_subject = subjects[0]["id"] if subjects else ""
     current_view = "overview"
     form_open = False
@@ -119,6 +160,36 @@ def main(page: ft.Page):
         "assignment": "提出物",
         "progress": "授業の進度",
     }
+
+    def current_subjects():
+        scoped_names = CLASS_SUBJECTS.get((selected_grade, selected_class))
+        if scoped_names is None:
+            scoped_subject_ids = {
+                subject_id
+                for configured_subjects in CLASS_SUBJECTS.values()
+                for subject_id, _ in configured_subjects
+            }
+            return [
+                subject for subject in subjects if subject["id"] not in scoped_subject_ids
+            ]
+        scoped_subjects = []
+        for subject_id, name in scoped_names:
+            subject = next(
+                (item for item in subjects if item["id"] == subject_id), None
+            )
+            if subject is None:
+                subject = {"id": subject_id, "name": name}
+                subjects.append(subject)
+            scoped_subjects.append(subject)
+        return scoped_subjects
+
+    def ensure_selected_subject():
+        nonlocal selected_subject
+        available_subjects = current_subjects()
+        if not any(item["id"] == selected_subject for item in available_subjects):
+            selected_subject = available_subjects[0]["id"] if available_subjects else ""
+
+    ensure_selected_subject()
 
     def persist():
         try:
@@ -138,7 +209,9 @@ def main(page: ft.Page):
         return [
             record
             for record in records
-            if record["subject_id"] == selected_subject
+            if record["grade"] == selected_grade
+            and record["class_name"] == selected_class
+            and record["subject_id"] == selected_subject
             and (kind is None or record["kind"] == kind)
         ]
 
@@ -167,6 +240,8 @@ def main(page: ft.Page):
         if record:
             record.update(
                 subject_id=selected_subject,
+                grade=selected_grade,
+                class_name=selected_class,
                 kind=kind,
                 title=values[0],
                 date=values[1],
@@ -178,6 +253,8 @@ def main(page: ft.Page):
                 {
                     "id": str(uuid4()),
                     "subject_id": selected_subject,
+                    "grade": selected_grade,
+                    "class_name": selected_class,
                     "kind": kind,
                     "title": values[0],
                     "date": values[1],
@@ -211,20 +288,40 @@ def main(page: ft.Page):
 
     def choose_subject(subject_id):
         nonlocal selected_subject, form_open, editing_id
-        selected_subject = subject_id
+        if any(item["id"] == subject_id for item in current_subjects()):
+            selected_subject = subject_id
+        form_open = False
+        editing_id = None
+        render()
+
+    def choose_grade(grade):
+        nonlocal selected_grade, selected_class, form_open, editing_id
+        selected_grade = grade
+        selected_class = CLASS_GROUPS[grade][0]
+        ensure_selected_subject()
+        form_open = False
+        editing_id = None
+        render()
+
+    def choose_class(class_name):
+        nonlocal selected_class, form_open, editing_id
+        selected_class = class_name
+        ensure_selected_subject()
         form_open = False
         editing_id = None
         render()
 
     def add_subject(event):
+        if (selected_grade, selected_class) in CLASS_SUBJECTS:
+            return
         name = subject_input.value.strip()
         if not name:
-            status_text.value = "クラス・科目名を入力してください。"
+            status_text.value = "教科名を入力してください。"
             status_text.color = ORANGE
             page.update()
             return
         if any(subject["name"] == name for subject in subjects):
-            status_text.value = "同じ名前のクラス・科目がすでにあります。"
+            status_text.value = "同じ名前の教科がすでにあります。"
             status_text.color = ORANGE
             page.update()
             return
@@ -237,7 +334,7 @@ def main(page: ft.Page):
             subjects.pop()
 
     subject_input = ft.TextField(
-        hint_text="クラス・科目名",
+        hint_text="教科を追加",
         width=180,
         height=42,
         text_size=13,
@@ -338,6 +435,34 @@ def main(page: ft.Page):
         page.padding = 14 if (page.width or 900) < 600 else 24
         available_width = min(920, (page.width or 968) - page.padding * 2)
 
+        grade_buttons = [
+            ft.TextButton(
+                grade,
+                on_click=lambda event, value=grade: choose_grade(value),
+                style=ft.ButtonStyle(
+                    color=GREEN if grade == selected_grade else MUTED,
+                    bgcolor=GREEN_LIGHT if grade == selected_grade else "#FFFFFF",
+                    shape=ft.RoundedRectangleBorder(radius=18),
+                    padding=ft.Padding.symmetric(horizontal=14, vertical=9),
+                ),
+            )
+            for grade in CLASS_GROUPS
+        ]
+        class_buttons = [
+            ft.TextButton(
+                class_name,
+                on_click=lambda event, value=class_name: choose_class(value),
+                style=ft.ButtonStyle(
+                    color=GREEN if class_name == selected_class else MUTED,
+                    bgcolor=GREEN_LIGHT if class_name == selected_class else "#FFFFFF",
+                    shape=ft.RoundedRectangleBorder(radius=18),
+                    padding=ft.Padding.symmetric(horizontal=12, vertical=8),
+                ),
+            )
+            for class_name in CLASS_GROUPS[selected_grade]
+        ]
+        available_subjects = current_subjects()
+        ensure_selected_subject()
         subject_buttons = [
             ft.TextButton(
                 subject["name"],
@@ -349,18 +474,21 @@ def main(page: ft.Page):
                     padding=ft.Padding.symmetric(horizontal=14, vertical=9),
                 ),
             )
-            for subject in subjects
+            for subject in available_subjects
         ]
-        subject_buttons.append(subject_input)
-        subject_buttons.append(
-            ft.IconButton(
-                icon=ft.Icons.ADD,
-                tooltip="クラス・科目を追加",
-                on_click=add_subject,
-                bgcolor=GREEN_LIGHT,
-                icon_color=GREEN,
+        if (selected_grade, selected_class) not in CLASS_SUBJECTS:
+            subject_buttons.extend(
+                [
+                    subject_input,
+                    ft.IconButton(
+                        icon=ft.Icons.ADD,
+                        tooltip="教科を追加",
+                        on_click=add_subject,
+                        bgcolor=GREEN_LIGHT,
+                        icon_color=GREEN,
+                    ),
+                ]
             )
-        )
 
         navigation = ft.Row(
             [
@@ -379,7 +507,6 @@ def main(page: ft.Page):
             scroll=ft.ScrollMode.AUTO,
         )
 
-        scoped_records = selected_records()
         body.controls = []
         if current_view == "overview":
             tests = selected_records("test")
@@ -525,11 +652,32 @@ def main(page: ft.Page):
                 ),
                 ft.Column(
                     [
-                        text_label("授業のこと、ここで共有。", 30, INK, ft.FontWeight.W_600),
-                        text_label("テスト範囲・提出物・授業の進度を、科目ごとに確認できます。", 13, MUTED),
+                        text_label(
+                            "授業のこと、ここで共有。", 30, INK, ft.FontWeight.W_600
+                        ),
+                        text_label(
+                            "学年・クラスを選んで、テスト範囲や提出物を確認できます。",
+                            13,
+                            MUTED,
+                        ),
                     ],
                     spacing=5,
                 ),
+                text_label("学年", 12, MUTED, ft.FontWeight.W_600),
+                ft.Row(
+                    grade_buttons,
+                    spacing=8,
+                    wrap=True,
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                ),
+                text_label("クラス・コース", 12, MUTED, ft.FontWeight.W_600),
+                ft.Row(
+                    class_buttons,
+                    spacing=6,
+                    wrap=True,
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                ),
+                text_label("教科", 12, MUTED, ft.FontWeight.W_600),
                 ft.Row(
                     subject_buttons,
                     spacing=8,
