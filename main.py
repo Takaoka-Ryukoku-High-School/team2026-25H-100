@@ -30,6 +30,11 @@ CLASS_SUBJECTS = {
         ("2-art-digital-art", "デジタルアート"),
         ("2-art-management", "アートマネジメント"),
     ],
+    ("2年生", "デジタルコース"): [
+        ("2-digital-biz", "Biz"),
+        ("2-digital-tech", "Tech"),
+        ("2-digital-tech-ad", "テクアド"),
+    ],
     ("2年生", "3組"): [
         ("2-3-classical-inquiry", "古典探求"),
         ("2-3-logical-japanese", "論理国語"),
