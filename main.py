@@ -30,6 +30,11 @@ CLASS_SUBJECTS = {
         ("2-art-digital-art", "デジタルアート"),
         ("2-art-management", "アートマネジメント"),
     ],
+    ("2年生", "L&Sコース"): [
+        ("2-ls-sports-synthesis", "スポーツ総合"),
+        ("2-ls-welfare-basics", "福祉基礎"),
+        ("2-ls-sports-science", "スポーツサイエンス"),
+    ],
     ("2年生", "デジタルコース"): [
         ("2-digital-biz", "Biz"),
         ("2-digital-tech", "Tech"),
@@ -101,6 +106,11 @@ CLASS_SUBJECTS = {
         ("2-7-physical-education", "体育"),
     ],
 }
+SECOND_GRADE_ADDITIONAL_SUBJECTS = [
+    ("music", "音楽"),
+    ("art", "美術"),
+    ("calligraphy", "書道"),
+]
 
 
 def starter_data():
@@ -217,7 +227,7 @@ def main(page: ft.Page):
     selected_grade = "1年生"
     selected_class = CLASS_GROUPS[selected_grade][0]
     selected_subject = subjects[0]["id"] if subjects else ""
-    current_view = "overview"
+    current_view = "assignment"
     form_open = False
     editing_id = None
     fields = []
@@ -225,33 +235,51 @@ def main(page: ft.Page):
     body = ft.Column(spacing=16)
 
     view_labels = {
-        "overview": "全体",
-        "test": "テスト範囲",
         "assignment": "提出物",
-        "progress": "授業の進度",
+        "progress": "授業進行度",
+        "test": "テスト範囲",
     }
 
     def current_subjects():
-        scoped_names = CLASS_SUBJECTS.get((selected_grade, selected_class))
+        class_key = (selected_grade, selected_class)
+        scoped_names = CLASS_SUBJECTS.get(class_key)
+        scoped_subject_ids = {
+            subject_id
+            for configured_subjects in CLASS_SUBJECTS.values()
+            for subject_id, _ in configured_subjects
+        }
+        scoped_subject_ids.update(
+            f"2-{number}-{subject_id}"
+            for number in range(1, 8)
+            for subject_id, _ in SECOND_GRADE_ADDITIONAL_SUBJECTS
+        )
         if scoped_names is None:
-            scoped_subject_ids = {
-                subject_id
-                for configured_subjects in CLASS_SUBJECTS.values()
-                for subject_id, _ in configured_subjects
-            }
-            return [
+            available_subjects = [
                 subject for subject in subjects if subject["id"] not in scoped_subject_ids
             ]
-        scoped_subjects = []
-        for subject_id, name in scoped_names:
+            subject_names = []
+        else:
+            available_subjects = []
+            subject_names = list(scoped_names)
+
+        if selected_grade == "2年生" and selected_class in {
+            f"{number}組" for number in range(1, 8)
+        }:
+            class_number = selected_class.removesuffix("組")
+            subject_names.extend(
+                (f"2-{class_number}-{subject_id}", name)
+                for subject_id, name in SECOND_GRADE_ADDITIONAL_SUBJECTS
+            )
+
+        for subject_id, name in subject_names:
             subject = next(
                 (item for item in subjects if item["id"] == subject_id), None
             )
             if subject is None:
                 subject = {"id": subject_id, "name": name}
                 subjects.append(subject)
-            scoped_subjects.append(subject)
-        return scoped_subjects
+            available_subjects.append(subject)
+        return available_subjects
 
     def ensure_selected_subject():
         nonlocal selected_subject
@@ -305,7 +333,7 @@ def main(page: ft.Page):
             status_text.color = ORANGE
             page.update()
             return
-        kind = current_view if current_view != "overview" else "test"
+        kind = current_view
         record = next((item for item in records if item["id"] == editing_id), None)
         if record:
             record.update(
@@ -420,7 +448,7 @@ def main(page: ft.Page):
         kind_labels = {
             "test": "テスト範囲",
             "assignment": "提出物",
-            "progress": "授業の進度",
+            "progress": "授業進行度",
         }
         done = record["done"]
         details = [
@@ -480,24 +508,6 @@ def main(page: ft.Page):
             bgcolor="#FFFFFF",
             border=ft.Border.all(1, LINE),
             border_radius=12,
-        )
-
-    def section_header(title, count, kind):
-        return ft.Row(
-            [
-                ft.Row(
-                    [
-                        text_label(title, 17, INK, ft.FontWeight.W_600),
-                        text_label(f"{count}件", 12, MUTED),
-                    ],
-                    spacing=10,
-                ),
-                ft.TextButton(
-                    "一覧を見る",
-                    on_click=lambda event, view=kind: choose_view(view),
-                ),
-            ],
-            alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
         )
 
     def render():
@@ -578,60 +588,27 @@ def main(page: ft.Page):
         )
 
         body.controls = []
-        if current_view == "overview":
-            tests = selected_records("test")
-            assignments = selected_records("assignment")
-            progress = selected_records("progress")
-            body.controls.extend(
+        kind = current_view
+        body.controls.append(
+            ft.Row(
                 [
-                    ft.Row(
-                        [
-                            summary_card("テスト", len(tests), "範囲・日程"),
-                            summary_card(
-                                "提出物",
-                                sum(not item["done"] for item in assignments),
-                                "未提出",
-                            ),
-                            summary_card("授業進度", len(progress), "更新"),
-                        ],
-                        spacing=12,
-                        vertical_alignment=ft.CrossAxisAlignment.STRETCH,
+                    text_label(view_labels[kind], 22, INK, ft.FontWeight.W_600),
+                    ft.Button(
+                        "＋ 追加",
+                        on_click=lambda event: open_form(),
+                        bgcolor=GREEN,
+                        color="#FFFFFF",
                     ),
-                ]
+                ],
+                alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
             )
-            for title, items, kind in (
-                ("次のテスト", tests, "test"),
-                ("提出物", assignments, "assignment"),
-                ("最近の授業", progress, "progress"),
-            ):
-                body.controls.append(section_header(title, len(items), kind))
-                body.controls.extend(
-                    record_card(item) for item in sorted(items, key=lambda row: row["date"])[:2]
-                )
-                if not items:
-                    body.controls.append(empty_state("まだ登録がありません。"))
-        else:
-            kind = current_view
-            body.controls.append(
-                ft.Row(
-                    [
-                        text_label(view_labels[kind], 22, INK, ft.FontWeight.W_600),
-                        ft.Button(
-                            "＋ 追加",
-                            on_click=lambda event: open_form(),
-                            bgcolor=GREEN,
-                            color="#FFFFFF",
-                        ),
-                    ],
-                    alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
-                )
-            )
-            filtered = selected_records(kind)
-            body.controls.extend(record_card(item) for item in filtered)
-            if not filtered:
-                body.controls.append(empty_state("まだ登録がありません。右上の「追加」から登録できます。"))
+        )
+        filtered = selected_records(kind)
+        body.controls.extend(record_card(item) for item in filtered)
+        if not filtered:
+            body.controls.append(empty_state("まだ登録がありません。右上の「追加」から登録できます。"))
 
-        if form_open and current_view != "overview":
+        if form_open:
             existing = next((item for item in records if item["id"] == editing_id), None)
             is_editing = existing is not None
             title_field = ft.TextField(
@@ -768,23 +745,6 @@ def main(page: ft.Page):
             )
         )
         page.update()
-
-    def summary_card(label, value, caption):
-        return ft.Container(
-            content=ft.Column(
-                [
-                    text_label(label, 12, MUTED),
-                    text_label(str(value), 26, GREEN, ft.FontWeight.W_600),
-                    text_label(caption, 11, MUTED),
-                ],
-                spacing=4,
-            ),
-            padding=16,
-            expand=True,
-            bgcolor="#FFFFFF",
-            border=ft.Border.all(1, LINE),
-            border_radius=12,
-        )
 
     def empty_state(message):
         return ft.Container(
