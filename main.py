@@ -157,6 +157,7 @@ def starter_data():
                 "done": False,
             },
         ],
+        "notifications": [],
     }
 
 
@@ -173,8 +174,14 @@ def load_data():
         raise ValueError("保存データの形式が正しくありません。")
     subjects = data.get("subjects")
     records = data.get("records")
+    notifications = data.get("notifications")
     if not isinstance(subjects, list) or not isinstance(records, list):
         raise ValueError("保存データに科目または共有情報がありません。")
+    if notifications is None:
+        notifications = []
+        data["notifications"] = notifications
+    if not isinstance(notifications, list):
+        raise ValueError("保存データの通知情報を読み込めません。")
     if any(
         not isinstance(subject, dict)
         or not isinstance(subject.get("id"), str)
@@ -194,6 +201,17 @@ def load_data():
         for record in records
     ):
         raise ValueError("保存データの共有情報を読み込めません。")
+    if any(
+        not isinstance(notification, dict)
+        or not isinstance(notification.get("id"), str)
+        or not isinstance(notification.get("subject_id"), str)
+        or not isinstance(notification.get("title"), str)
+        or not isinstance(notification.get("date"), str)
+        or not isinstance(notification.get("detail"), str)
+        or not isinstance(notification.get("read"), bool)
+        for notification in notifications
+    ):
+        raise ValueError("保存データの通知情報を読み込めません。")
     migrated = False
     for record in records:
         if "grade" not in record:
@@ -206,6 +224,30 @@ def load_data():
             record["class_name"], str
         ):
             raise ValueError("保存データの学年・クラス情報を読み込めません。")
+    for notification in notifications:
+        if "grade" not in notification:
+            notification["grade"] = "1年生"
+            migrated = True
+        if "class_name" not in notification:
+            notification["class_name"] = "1組"
+            migrated = True
+        if not isinstance(notification["grade"], str) or not isinstance(
+            notification["class_name"], str
+        ):
+            raise ValueError("保存データの通知の学年・クラス情報を読み込めません。")
+        source_record = next(
+            (record for record in records if record["id"] == notification.get("source_id")),
+            None,
+        )
+        if source_record and source_record["kind"] == "assignment" and notification.get("event_type") == "updated":
+            subject_name = next(
+                (subject["name"] for subject in subjects if subject["id"] == source_record["subject_id"]),
+                "教科",
+            )
+            updated_title = f"{subject_name}の提出物が更新されました: {source_record['title']}"
+            if notification["title"] != updated_title:
+                notification["title"] = updated_title
+                migrated = True
     if migrated:
         DATA_FILE.write_text(
             json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
@@ -224,6 +266,7 @@ def main(page: ft.Page):
     data = load_data()
     subjects = data["subjects"]
     records = data["records"]
+    notifications = data["notifications"]
     selected_grade = "1年生"
     selected_class = CLASS_GROUPS[selected_grade][0]
     selected_subject = subjects[0]["id"] if subjects else ""
@@ -313,6 +356,75 @@ def main(page: ft.Page):
             and (kind is None or record["kind"] == kind)
         ]
 
+    def selected_notifications():
+        return [
+            item
+            for item in notifications
+            if item["grade"] == selected_grade
+            and item["class_name"] == selected_class
+        ]
+
+    def notification_for_record(record, event_type):
+        if event_type == "deadline":
+            title = f"提出期限が近づいています: {record['title']}"
+            detail = f"{record['date']} に提出予定です。忘れずに確認してください。"
+        elif event_type == "status_changed":
+            title = f"提出物の状態が変更されました: {record['title']}"
+            detail = f"現在の状態: {'提出済み' if record['done'] else '未提出'}"
+        elif record["kind"] == "assignment":
+            subject_name = next(
+                (
+                    subject["name"]
+                    for subject in subjects
+                    if subject["id"] == record["subject_id"]
+                ),
+                "教科",
+            )
+            title = f"{subject_name}の提出物が更新されました: {record['title']}"
+            detail = record["detail"]
+        else:
+            title = f"{view_labels.get(record['kind'], '項目')}が更新されました: {record['title']}"
+            detail = record["detail"]
+        return {
+            "id": str(uuid4()),
+            "subject_id": record["subject_id"],
+            "grade": record["grade"],
+            "class_name": record["class_name"],
+            "title": title,
+            "date": record["date"],
+            "detail": detail,
+            "read": False,
+            "source_id": record["id"],
+            "event_type": event_type,
+        }
+
+    def add_notification(record, event_type):
+        if any(
+            item.get("source_id") == record["id"] and item.get("event_type") == event_type
+            for item in notifications
+        ):
+            return
+        notifications.insert(0, notification_for_record(record, event_type))
+
+    def sync_notifications():
+        seen = {
+            (item.get("source_id"), item.get("event_type"))
+            for item in notifications
+            if item.get("source_id") is not None and item.get("event_type") is not None
+        }
+        for record in records:
+            if record["kind"] != "assignment" or record["done"]:
+                continue
+            try:
+                due_date = date.fromisoformat(record["date"])
+            except ValueError:
+                continue
+            days_left = (due_date - date.today()).days
+            key = (record["id"], "deadline")
+            if 0 <= days_left <= 3 and key not in seen:
+                notifications.insert(0, notification_for_record(record, "deadline"))
+                seen.add(key)
+
     def open_form(record=None):
         nonlocal form_open, editing_id
         form_open = True
@@ -336,6 +448,9 @@ def main(page: ft.Page):
         kind = current_view
         record = next((item for item in records if item["id"] == editing_id), None)
         if record:
+            existing_title = record["title"]
+            existing_detail = record["detail"]
+            existing_date = record["date"]
             record.update(
                 subject_id=selected_subject,
                 grade=selected_grade,
@@ -345,37 +460,87 @@ def main(page: ft.Page):
                 date=values[1],
                 detail=values[2],
             )
+            if (
+                existing_title != values[0]
+                or existing_detail != values[2]
+                or existing_date != values[1]
+            ):
+                add_notification(record, "updated")
         else:
-            records.insert(
-                0,
-                {
-                    "id": str(uuid4()),
-                    "subject_id": selected_subject,
-                    "grade": selected_grade,
-                    "class_name": selected_class,
-                    "kind": kind,
-                    "title": values[0],
-                    "date": values[1],
-                    "detail": values[2],
-                    "done": False,
-                },
-            )
+            record = {
+                "id": str(uuid4()),
+                "subject_id": selected_subject,
+                "grade": selected_grade,
+                "class_name": selected_class,
+                "kind": kind,
+                "title": values[0],
+                "date": values[1],
+                "detail": values[2],
+                "done": False,
+            }
+            records.insert(0, record)
+            add_notification(record, "updated")
         if persist():
             form_open = False
             editing_id = None
+            sync_notifications()
         render()
 
     def delete_record(record_id):
         records[:] = [record for record in records if record["id"] != record_id]
+        notifications[:] = [
+            notification
+            for notification in notifications
+            if notification.get("source_id") != record_id
+        ]
         persist()
         render()
 
     def toggle_done(record_id):
         record = next((item for item in records if item["id"] == record_id), None)
         if record:
+            before = record["done"]
             record["done"] = not record["done"]
+            if before != record["done"]:
+                add_notification(record, "status_changed")
+            persist()
+            sync_notifications()
+            render()
+
+    def mark_notification_read(notification_id):
+        notification = next((item for item in notifications if item["id"] == notification_id), None)
+        if notification and not notification["read"]:
+            notification["read"] = True
             persist()
             render()
+
+    def open_notification_item(notification_id):
+        nonlocal selected_grade, selected_class, selected_subject
+        nonlocal current_view, form_open, editing_id
+        notification = next(
+            (item for item in notifications if item["id"] == notification_id),
+            None,
+        )
+        record = next(
+            (
+                item
+                for item in records
+                if notification and item["id"] == notification.get("source_id")
+            ),
+            None,
+        )
+        if record is None:
+            status_text.value = "通知に関連する項目が見つかりません。"
+            status_text.color = ORANGE
+            page.update()
+            return
+        selected_grade = record["grade"]
+        selected_class = record["class_name"]
+        selected_subject = record["subject_id"]
+        current_view = record["kind"]
+        form_open = False
+        editing_id = None
+        render()
 
     def choose_view(view):
         nonlocal current_view, form_open, editing_id
@@ -443,6 +608,51 @@ def main(page: ft.Page):
 
     def text_label(value, size=13, color=INK, weight=None):
         return ft.Text(value, size=size, color=color, weight=weight)
+
+    def notification_card(notification):
+        is_read = notification["read"]
+        has_source = any(
+            record["id"] == notification.get("source_id") for record in records
+        )
+        metadata = ft.Row(
+            [
+                text_label(notification["date"] or "日付未設定", 12, MUTED),
+                text_label("確認済み" if is_read else "未確認", 11, GREEN if is_read else ORANGE),
+            ],
+            spacing=10,
+        )
+        actions = []
+        if has_source:
+            actions.append(
+                ft.TextButton(
+                    "項目を開く",
+                    icon=ft.Icons.OPEN_IN_NEW,
+                    on_click=lambda event, item_id=notification["id"]: open_notification_item(item_id),
+                )
+            )
+        if not is_read:
+            actions.append(
+                ft.TextButton(
+                    "確認",
+                    icon=ft.Icons.CHECK_CIRCLE_OUTLINE,
+                    on_click=lambda event, item_id=notification["id"]: mark_notification_read(item_id),
+                )
+            )
+        return ft.Container(
+            content=ft.Column(
+                [
+                    metadata,
+                    text_label(notification["title"], 15, INK, ft.FontWeight.W_600),
+                    text_label(notification["detail"], 13, MUTED),
+                    ft.Row(actions, alignment=ft.MainAxisAlignment.END) if actions else ft.Container(),
+                ],
+                spacing=8,
+            ),
+            padding=16,
+            bgcolor="#FFFFFF" if not is_read else "#F7F7F5",
+            border=ft.Border.all(1, LINE),
+            border_radius=12,
+        )
 
     def record_card(record):
         kind_labels = {
@@ -512,6 +722,7 @@ def main(page: ft.Page):
 
     def render():
         nonlocal fields
+        sync_notifications()
         page.padding = 14 if (page.width or 900) < 600 else 24
         available_width = min(920, (page.width or 968) - page.padding * 2)
 
@@ -570,6 +781,23 @@ def main(page: ft.Page):
                 ]
             )
 
+        unsubmitted_count = sum(
+            1
+            for record in records
+            if record["grade"] == selected_grade
+            and record["class_name"] == selected_class
+            and record["kind"] == "assignment"
+            and not record["done"]
+        )
+        navigation_items = [
+            (
+                view,
+                f"{label} ({unsubmitted_count})"
+                if view == "assignment" and unsubmitted_count
+                else label,
+            )
+            for view, label in view_labels.items()
+        ] + [("notifications", "過去の通知")]
         navigation = ft.Row(
             [
                 ft.TextButton(
@@ -581,7 +809,7 @@ def main(page: ft.Page):
                         shape=ft.RoundedRectangleBorder(radius=8),
                     ),
                 )
-                for view, label in view_labels.items()
+                for view, label in navigation_items
             ],
             spacing=4,
             scroll=ft.ScrollMode.AUTO,
@@ -589,24 +817,33 @@ def main(page: ft.Page):
 
         body.controls = []
         kind = current_view
-        body.controls.append(
-            ft.Row(
-                [
-                    text_label(view_labels[kind], 22, INK, ft.FontWeight.W_600),
-                    ft.Button(
-                        "＋ 追加",
-                        on_click=lambda event: open_form(),
-                        bgcolor=GREEN,
-                        color="#FFFFFF",
-                    ),
-                ],
-                alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+        if kind == "notifications":
+            body.controls.append(
+                text_label("過去の通知", 22, INK, ft.FontWeight.W_600)
             )
-        )
-        filtered = selected_records(kind)
-        body.controls.extend(record_card(item) for item in filtered)
-        if not filtered:
-            body.controls.append(empty_state("まだ登録がありません。右上の「追加」から登録できます。"))
+            filtered = selected_notifications()
+            body.controls.extend(notification_card(item) for item in filtered)
+            if not filtered:
+                body.controls.append(empty_state("このクラスの通知はまだありません。"))
+        else:
+            body.controls.append(
+                ft.Row(
+                    [
+                        text_label(view_labels[kind], 22, INK, ft.FontWeight.W_600),
+                        ft.Button(
+                            "＋ 追加",
+                            on_click=lambda event: open_form(),
+                            bgcolor=GREEN,
+                            color="#FFFFFF",
+                        ),
+                    ],
+                    alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                )
+            )
+            filtered = selected_records(kind)
+            body.controls.extend(record_card(item) for item in filtered)
+            if not filtered:
+                body.controls.append(empty_state("まだ登録がありません。右上の「追加」から登録できます。"))
 
         if form_open:
             existing = next((item for item in records if item["id"] == editing_id), None)
@@ -669,6 +906,66 @@ def main(page: ft.Page):
         else:
             fields = []
 
+        unread_notifications = [
+            item
+            for item in notifications
+            if item["grade"] == selected_grade
+            and item["class_name"] == selected_class
+            and not item["read"]
+        ]
+        notification_badge = ft.Container(
+            content=text_label(f"通知 {len(unread_notifications)}件", 11, GREEN),
+            bgcolor=GREEN_LIGHT,
+            padding=ft.Padding.symmetric(horizontal=10, vertical=5),
+            border_radius=12,
+        )
+        notification_feed = []
+        for notification in unread_notifications[:3]:
+            notification_actions = []
+            if any(
+                record["id"] == notification.get("source_id") for record in records
+            ):
+                notification_actions.append(
+                    ft.TextButton(
+                        "項目を開く",
+                        on_click=lambda event, item_id=notification["id"]: open_notification_item(item_id),
+                    )
+                )
+            notification_actions.append(
+                ft.TextButton(
+                    "確認",
+                    on_click=lambda event, item_id=notification["id"]: mark_notification_read(item_id),
+                )
+            )
+            notification_feed.append(
+                ft.Row(
+                    [
+                        ft.Column(
+                            [
+                                ft.Text(notification["title"], size=12, color=INK, weight=ft.FontWeight.W_600),
+                                ft.Text(notification["detail"], size=11, color=MUTED),
+                            ],
+                            spacing=4,
+                            expand=True,
+                        ),
+                        ft.Row(notification_actions, spacing=0),
+                    ],
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                )
+            )
+        notification_panel = ft.Container(
+            content=ft.Column(
+                [
+                    text_label("最新の通知", 12, MUTED, ft.FontWeight.W_600),
+                    *notification_feed,
+                ] if notification_feed else [text_label("現在のクラスでは通知はありません。", 12, MUTED)],
+                spacing=6,
+            ),
+            padding=14,
+            bgcolor="#FFFFFF",
+            border=ft.Border.all(1, LINE),
+            border_radius=12,
+        ) if unread_notifications else ft.Container()
         header = ft.Column(
             [
                 ft.Row(
@@ -693,7 +990,13 @@ def main(page: ft.Page):
                             ],
                             spacing=10,
                         ),
-                        text_label(date.today().strftime("%Y年%m月%d日"), 12, MUTED),
+                        ft.Row(
+                            [
+                                notification_badge,
+                                text_label(date.today().strftime("%Y年%m月%d日"), 12, MUTED),
+                            ],
+                            spacing=12,
+                        ),
                     ],
                     alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
                 ),
@@ -731,6 +1034,7 @@ def main(page: ft.Page):
                     wrap=True,
                     vertical_alignment=ft.CrossAxisAlignment.CENTER,
                 ),
+                notification_panel,
                 navigation,
                 status_text,
             ],
