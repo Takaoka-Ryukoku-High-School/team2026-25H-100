@@ -1,3 +1,4 @@
+import base64
 import json
 from datetime import date, timedelta
 from pathlib import Path
@@ -14,10 +15,13 @@ INK = "#26332E"
 MUTED = "#7B8580"
 LINE = "#E4E7E1"
 ORANGE = "#B86A35"
+ALL_SUBJECT_ID = "__all__"
+MERGED_CLASS_NAME = "1・2組"
 CLASS_GROUPS = {
-    "1年生": [f"{number}組" for number in range(1, 8)],
+    "1年生": [MERGED_CLASS_NAME, *(f"{number}組" for number in range(3, 8))],
     "2年生": [
-        *(f"{number}組" for number in range(1, 8)),
+        MERGED_CLASS_NAME,
+        *(f"{number}組" for number in range(3, 8)),
         "アートコース",
         "L&Sコース",
         "デジタルコース",
@@ -198,6 +202,7 @@ def load_data():
         or not isinstance(record.get("date"), str)
         or not isinstance(record.get("detail"), str)
         or not isinstance(record.get("done"), bool)
+        or ("photo_base64" in record and record["photo_base64"] is not None and not isinstance(record["photo_base64"], str))
         for record in records
     ):
         raise ValueError("保存データの共有情報を読み込めません。")
@@ -224,6 +229,9 @@ def load_data():
             record["class_name"], str
         ):
             raise ValueError("保存データの学年・クラス情報を読み込めません。")
+        if record["class_name"] in {"1組", "2組"}:
+            record["class_name"] = MERGED_CLASS_NAME
+            migrated = True
     for notification in notifications:
         if "grade" not in notification:
             notification["grade"] = "1年生"
@@ -235,6 +243,9 @@ def load_data():
             notification["class_name"], str
         ):
             raise ValueError("保存データの通知の学年・クラス情報を読み込めません。")
+        if notification["class_name"] in {"1組", "2組"}:
+            notification["class_name"] = MERGED_CLASS_NAME
+            migrated = True
         source_record = next(
             (record for record in records if record["id"] == notification.get("source_id")),
             None,
@@ -273,9 +284,12 @@ def main(page: ft.Page):
     current_view = "assignment"
     form_open = False
     editing_id = None
+    photo_upload_base64 = None
     fields = []
     status_text = ft.Text("", size=12, color=ORANGE)
     body = ft.Column(spacing=16)
+    FILE_PICKER = ft.FilePicker()
+    page.services.append(FILE_PICKER)
 
     view_labels = {
         "assignment": "提出物",
@@ -286,6 +300,9 @@ def main(page: ft.Page):
     def current_subjects():
         class_key = (selected_grade, selected_class)
         scoped_names = CLASS_SUBJECTS.get(class_key)
+        has_class_wide_subject = selected_class == MERGED_CLASS_NAME or selected_class in {
+            f"{number}組" for number in range(3, 8)
+        }
         scoped_subject_ids = {
             subject_id
             for configured_subjects in CLASS_SUBJECTS.values()
@@ -305,12 +322,18 @@ def main(page: ft.Page):
             available_subjects = []
             subject_names = list(scoped_names)
 
-        if selected_grade == "2年生" and selected_class in {
-            f"{number}組" for number in range(1, 8)
-        }:
-            class_number = selected_class.removesuffix("組")
+        if selected_grade == "2年生" and (
+            selected_class == MERGED_CLASS_NAME
+            or selected_class in {f"{number}組" for number in range(3, 8)}
+        ):
+            class_numbers = (
+                ("1", "2")
+                if selected_class == MERGED_CLASS_NAME
+                else (selected_class.removesuffix("組"),)
+            )
             subject_names.extend(
                 (f"2-{class_number}-{subject_id}", name)
+                for class_number in class_numbers
                 for subject_id, name in SECOND_GRADE_ADDITIONAL_SUBJECTS
             )
 
@@ -322,6 +345,8 @@ def main(page: ft.Page):
                 subject = {"id": subject_id, "name": name}
                 subjects.append(subject)
             available_subjects.append(subject)
+        if has_class_wide_subject:
+            available_subjects.insert(0, {"id": ALL_SUBJECT_ID, "name": "全体"})
         return available_subjects
 
     def ensure_selected_subject():
@@ -352,7 +377,10 @@ def main(page: ft.Page):
             for record in records
             if record["grade"] == selected_grade
             and record["class_name"] == selected_class
-            and record["subject_id"] == selected_subject
+            and (
+                selected_subject == ALL_SUBJECT_ID
+                or record["subject_id"] == selected_subject
+            )
             and (kind is None or record["kind"] == kind)
         ]
 
@@ -378,7 +406,7 @@ def main(page: ft.Page):
                     for subject in subjects
                     if subject["id"] == record["subject_id"]
                 ),
-                "教科",
+                "全体" if record["subject_id"] == ALL_SUBJECT_ID else "教科",
             )
             title = f"{subject_name}の提出物が更新されました: {record['title']}"
             detail = record["detail"]
@@ -425,20 +453,48 @@ def main(page: ft.Page):
                 notifications.insert(0, notification_for_record(record, "deadline"))
                 seen.add(key)
 
+    async def choose_photo(event):
+        nonlocal photo_upload_base64
+        selected_files = await FILE_PICKER.pick_files(
+            file_type=ft.FilePickerFileType.IMAGE,
+            allow_multiple=False,
+            with_data=True,
+        )
+        if not selected_files:
+            return
+        image_bytes = selected_files[0].bytes
+        if not image_bytes:
+            status_text.value = "写真のデータを取得できませんでした。別の画像を選んでください。"
+            status_text.color = ORANGE
+            page.update()
+            return
+        photo_upload_base64 = base64.b64encode(image_bytes).decode("utf-8")
+        status_text.value = "写真を追加しました。"
+        status_text.color = GREEN
+        page.update()
+        render()
+
+    def remove_photo_upload():
+        nonlocal photo_upload_base64
+        photo_upload_base64 = None
+        render()
+
     def open_form(record=None):
-        nonlocal form_open, editing_id
+        nonlocal form_open, editing_id, photo_upload_base64
         form_open = True
         editing_id = record["id"] if record else None
+        photo_upload_base64 = record.get("photo_base64") if record else None
         render()
 
     def close_form():
-        nonlocal form_open, editing_id
+        nonlocal form_open, editing_id, photo_upload_base64
         form_open = False
         editing_id = None
+        photo_upload_base64 = None
         render()
 
     def save_record(event):
-        nonlocal form_open, editing_id
+        nonlocal form_open, editing_id, photo_upload_base64
         values = [field.value.strip() for field in fields]
         if not values[0]:
             status_text.value = "タイトルを入力してください。"
@@ -447,23 +503,31 @@ def main(page: ft.Page):
             return
         kind = current_view
         record = next((item for item in records if item["id"] == editing_id), None)
+        photo_value = None if photo_upload_base64 in {None, ""} else photo_upload_base64
         if record:
             existing_title = record["title"]
             existing_detail = record["detail"]
             existing_date = record["date"]
+            record_subject_id = (
+                record["subject_id"]
+                if selected_subject == ALL_SUBJECT_ID
+                else selected_subject
+            )
             record.update(
-                subject_id=selected_subject,
+                subject_id=record_subject_id,
                 grade=selected_grade,
                 class_name=selected_class,
                 kind=kind,
                 title=values[0],
                 date=values[1],
                 detail=values[2],
+                photo_base64=photo_value,
             )
             if (
                 existing_title != values[0]
                 or existing_detail != values[2]
                 or existing_date != values[1]
+                or record.get("photo_base64") != photo_value
             ):
                 add_notification(record, "updated")
         else:
@@ -477,12 +541,14 @@ def main(page: ft.Page):
                 "date": values[1],
                 "detail": values[2],
                 "done": False,
+                "photo_base64": photo_value,
             }
             records.insert(0, record)
             add_notification(record, "updated")
         if persist():
             form_open = False
             editing_id = None
+            photo_upload_base64 = None
             sync_notifications()
         render()
 
@@ -682,6 +748,20 @@ def main(page: ft.Page):
             ),
             text_label(record["detail"], 13, MUTED),
         ]
+        photo_bytes = record.get("photo_base64")
+        if photo_bytes:
+            details.append(
+                ft.Container(
+                    content=ft.Image(
+                        src_base64=photo_bytes,
+                        width=220,
+                        height=160,
+                        fit=ft.ImageFit.COVER,
+                        border_radius=10,
+                    ),
+                    alignment=ft.alignment.center_left,
+                )
+            )
         actions = []
         if record["kind"] == "assignment":
             actions.append(
@@ -756,7 +836,13 @@ def main(page: ft.Page):
         ensure_selected_subject()
         subject_buttons = [
             ft.TextButton(
-                subject["name"],
+                (
+                    f"{subject['name']}（{subject['id'][2]}組）"
+                    if selected_grade == "2年生"
+                    and selected_class == MERGED_CLASS_NAME
+                    and subject["id"].startswith(("2-1-", "2-2-"))
+                    else subject["name"]
+                ),
                 on_click=lambda event, subject_id=subject["id"]: choose_subject(subject_id),
                 style=ft.ButtonStyle(
                     color=GREEN if subject["id"] == selected_subject else MUTED,
@@ -868,6 +954,43 @@ def main(page: ft.Page):
                 max_lines=4,
                 border_radius=8,
             )
+            current_photo_base64 = photo_upload_base64 or (existing or {}).get("photo_base64")
+            photo_preview = []
+            if current_photo_base64:
+                photo_preview.append(
+                    ft.Container(
+                        content=ft.Image(
+                            src_base64=current_photo_base64,
+                            width=220,
+                            height=160,
+                            fit=ft.ImageFit.COVER,
+                            border_radius=10,
+                        ),
+                        padding=ft.Padding.only(bottom=8),
+                    )
+                )
+            photo_controls = [
+                ft.Row(
+                    [
+                        ft.Button(
+                            "写真を選ぶ",
+                            icon=ft.Icons.PHOTO_CAMERA,
+                            on_click=choose_photo,
+                            bgcolor=GREEN,
+                            color="#FFFFFF",
+                        ),
+                    ],
+                    alignment=ft.MainAxisAlignment.START,
+                )
+            ]
+            if current_photo_base64:
+                photo_controls.append(
+                    ft.TextButton(
+                        "写真を削除",
+                        icon=ft.Icons.DELETE_OUTLINE,
+                        on_click=lambda event: remove_photo_upload(),
+                    )
+                )
             fields = [title_field, date_field, detail_field]
             body.controls.insert(
                 1,
@@ -883,6 +1006,14 @@ def main(page: ft.Page):
                             title_field,
                             date_field,
                             detail_field,
+                            ft.Column(
+                                [
+                                    text_label("写真", 12, MUTED, ft.FontWeight.W_600),
+                                    *photo_preview,
+                                    *photo_controls,
+                                ],
+                                spacing=8,
+                            ),
                             ft.Row(
                                 [
                                     ft.TextButton("キャンセル", on_click=lambda event: close_form()),
